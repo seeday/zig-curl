@@ -1,7 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const log = std.log;
-const c = @import("c.zig").c;
+pub const c = @import("c.zig").c;
 const cerr = @import("errors.zig");
 const CurlError = cerr.CurlError;
 
@@ -9,31 +9,39 @@ inline fn curlEasyPerform(handle: *c.CURL) CurlError!void {
     try cerr.translateError(c.curl_easy_perform(handle));
 }
 
-inline fn curlEasySetOpt(handle: *c.CURL, opt: c_uint, data: anytype) CurlError!void {
+inline fn curlEasySetOpt(handle: *c.CURL, opt: c_uint, data: *const anyopaque) CurlError!void {
     try cerr.translateError(c.curl_easy_setopt(handle, opt, data));
 }
 
 /// Curl errors not from the library, but from the zig wrapper
-const EasierCurlError = error{IncorrectContentLength};
+pub const EasierCurlError = error{IncorrectContentLength};
 
-const CurlErrors = CurlError || EasierCurlError;
+pub const CurlErrors = CurlError || EasierCurlError;
 
-const Method = enum { GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD, CONNECT, TRACE };
+pub const Method = enum { GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD, CONNECT, TRACE };
 
-fn curlSmartSetopt(handle: *c.CURL, comptime opt: c.CURLoption, value: anytype) CurlError!void {
-    // well this doesn't work because easy_option_by_id doesn't. Maybe if we find the table
-    // that it's generated into we can reproduce that function, but who knows
-    var o: ?*const c.curl_easyoption = c.curl_easy_option_by_id(opt);
-    if (o) |oo| {
-        switch (oo.type) {
-            c.CURLOT_STRING => return if (@TypeOf(value) == [*]const u8) (try curlEasySetOpt(handle, opt, value)) else @compileError("this opt takes strings"),
-            c.CURLOT_LONG => return if (@TypeOf(value) == c_long) (try curlEasySetOpt(handle, opt, value)) else @compileError("this opt takes longs"),
-            else => unreachable,
+pub const Request = struct {
+    pub const Option = struct { id: c_uint, val: *const anyopaque };
+    method: Method = .GET,
+    url: []const u8,
+    headers: ?std.StringHashMap([]const u8) = null,
+    body: ?[]const u8 = null,
+    options: ?[]const Option = null,
+};
+
+pub const Response = struct {
+    code: c_long,
+    data: ?std.ArrayList(u8),
+
+    /// Conveniently deinit the data array
+    pub fn deinit(self: *const Response) void {
+        if (self.data) |d| {
+            d.deinit();
         }
     }
-}
+};
 
-const Curl = struct {
+pub const Curl = struct {
     alloc: std.mem.Allocator,
     handle: *c.CURL,
 
@@ -81,48 +89,47 @@ const Curl = struct {
         return realsize;
     }
 
-    pub fn get(self: *const Self, url: []const u8) CurlErrors!std.ArrayList(u8) {
+    pub fn execute(self: *const Self, req: *const Request) CurlErrors!Response {
         var lst = std.ArrayList(u8).init(self.alloc);
         errdefer lst.deinit();
 
         c.curl_easy_reset(self.handle);
-        try curlSmartSetopt(self.handle, c.CURLOPT_URL, url.ptr);
-        //try curlEasySetOpt(self.handle, c.CURLOPT_URL, url.ptr);
-        try curlEasySetOpt(self.handle, c.CURLOPT_WRITEFUNCTION, downloadFn);
-        try curlEasySetOpt(self.handle, c.CURLOPT_WRITEDATA, &lst);
 
-        try curlEasyPerform(self.handle);
-        var size: c.curl_off_t = undefined;
-        _ = c.curl_easy_getinfo(self.handle, c.CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &size);
-        if (size != lst.items.len) {
-            //std.log.warn("content-length {} != response size {}", .{ size, lst.items.len });
-            return EasierCurlError.IncorrectContentLength;
+        switch (req.method) {
+            .GET => {},
+            .POST => {
+                try curlEasySetOpt(self.handle, c.CURLOPT_POST, @intToPtr(*anyopaque, 1));
+            },
+            else => {
+                // there's some set custom header option in libcurl
+                unreachable;
+            },
         }
-        return lst;
-    }
-
-    pub fn post(self: *const Self, url: []const u8, payload: ?[]const u8) CurlErrors!std.ArrayList(u8) {
-        var lst = std.ArrayList(u8).init(self.alloc);
-        errdefer lst.deinit();
-
-        c.curl_easy_reset(self.handle);
-        try curlEasySetOpt(self.handle, c.CURLOPT_URL, url.ptr);
+        try curlEasySetOpt(self.handle, c.CURLOPT_URL, req.url.ptr);
         try curlEasySetOpt(self.handle, c.CURLOPT_WRITEFUNCTION, downloadFn);
         try curlEasySetOpt(self.handle, c.CURLOPT_WRITEDATA, &lst);
-
-        try curlEasySetOpt(self.handle, c.CURLOPT_POST, @as(usize, 1));
-        if (payload) |p| {
-            var upl = CurlUploadProgress{ .data = p, .prog = 0 };
+        if (req.options) |oo| {
+            for (oo) |o| {
+                try curlEasySetOpt(self.handle, o.id, o.val);
+            }
+        }
+        if (req.body) |b| {
+            var upl = CurlUploadProgress{ .data = b, .prog = 0 };
             try curlEasySetOpt(self.handle, c.CURLOPT_READFUNCTION, uploadFn);
             try curlEasySetOpt(self.handle, c.CURLOPT_READDATA, &upl);
-
-            // if we want to post form data, use c.CURLOPT_POSTFIELDSIZE
-            // if you want to do raw data, use CURLOPT_UPLOAD and CURLOPT_INFILESIZE
-            try curlEasySetOpt(self.handle, c.CURLOPT_UPLOAD, @as(c_long, 1));
-            try curlEasySetOpt(self.handle, c.CURLOPT_INFILESIZE, p.len);
+            try curlEasySetOpt(self.handle, c.CURLOPT_UPLOAD, @intToPtr(*anyopaque, 1));
+            try curlEasySetOpt(self.handle, c.CURLOPT_INFILESIZE, @intToPtr(*anyopaque, b.len));
         }
         try curlEasyPerform(self.handle);
-        return lst;
+        var resp = Response{ .code = undefined, .data = undefined };
+        _ = c.curl_easy_getinfo(self.handle, c.CURLINFO_RESPONSE_CODE, &resp.code);
+        if (lst.items.len != 0) {
+            resp.data = lst;
+        } else {
+            resp.data = null;
+            lst.deinit();
+        }
+        return resp;
     }
 };
 
@@ -136,20 +143,30 @@ test "init deinit" {
 test "get" {
     const curl = try Curl.init(std.testing.allocator);
     defer curl.deinit();
-    _ = c.curl_easy_setopt(curl.handle, c.CURLOPT_VERBOSE, @as(usize, 1));
+    _ = c.curl_easy_setopt(curl.handle, c.CURLOPT_VERBOSE, @intToPtr(*anyopaque, 1));
 
-    var res = try curl.get("https://example.net");
+    var req = Request{ .method = .GET, .url = "https://example.net" };
+    var res = try curl.execute(&req);
     defer res.deinit();
-    try testing.expectEqual(@as(u8, '<'), res.items[0]);
-    try testing.expectStringEndsWith(res.items, ">\n");
-    try testing.expectEqual(@as(u8, '\n'), res.items[res.items.len - 1]);
+    try testing.expectEqual(@as(c_long, 200), res.code);
+    try testing.expectEqual(@as(u8, '<'), res.data.?.items[0]);
+    try testing.expectStringEndsWith(res.data.?.items, ">\n");
+    try testing.expectEqual(@as(u8, '\n'), res.data.?.items[res.data.?.items.len - 1]);
 }
 
 test "post" {
     const curl = try Curl.init(std.testing.allocator);
     defer curl.deinit();
+    const payload = "hello, world!";
 
-    var res = try curl.post("https://httpbin.org/anything", "hello, world!");
+    const req = Request{ .method = .POST, .url = "https://httpbin.org/anything", .body = payload, .options = &.{.{ .id = c.CURLOPT_VERBOSE, .val = @intToPtr(*anyopaque, 1) }} };
+    var res = try curl.execute(&req);
     defer res.deinit();
-    try testing.expectEqualStrings("hello, world", res.items);
+    try testing.expectEqual(@as(c_long, 200), res.code);
+
+    var p = std.json.Parser.init(std.testing.allocator, false);
+    defer p.deinit();
+    var j = try p.parse(res.data.?.items);
+    defer j.deinit();
+    try testing.expectEqualStrings(payload, j.root.Object.get("data").?.String);
 }

@@ -2,10 +2,12 @@ const c = @import("c.zig").c;
 
 /// Zigified error enum
 pub const CurlError = error {
-    UnsupportedProtocol,
-    FailedInit,
-    UrlMalformat,
-
+    /// Unsupported protocol
+    UnsupportedProtocol, // why does zigfmt fail on this?
+    /// failed init lol
+    FailedInit, // is that actually a bug?
+    /// bad url :(
+    UrlMalformat, // that would be unpleasant
     /// 4 - was obsoleted in August 2007 for 7.17.0, reused in April 2011 for 7.21.5
     NotBuiltIn,
     CouldntResolveProxy,
@@ -220,7 +222,7 @@ pub fn translateError(e: c.CURLcode) CurlError!void {
         c.CURLE_OBSOLETE46 => CurlError.Obsolete46,
         c.CURLE_TOO_MANY_REDIRECTS => CurlError.TooManyRedirects,
         c.CURLE_UNKNOWN_OPTION => CurlError.UnknownOption,
-        c.CURLE_SETOPT_OPTION_SYNTAX => CurlError.SetoptOptionSyntax,
+        //c.CURLE_SETOPT_OPTION_SYNTAX => CurlError.SetoptOptionSyntax,
         c.CURLE_OBSOLETE50 => CurlError.Obsolete50,
         c.CURLE_OBSOLETE51 => CurlError.Obsolete51,
         c.CURLE_GOT_NOTHING => CurlError.GotNothing,
